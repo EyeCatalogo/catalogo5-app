@@ -8,21 +8,18 @@ import requests
 from io import BytesIO
 from datetime import datetime
 from reportlab.lib.pagesizes import A4
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image as RLImage, Table, TableStyle, PageBreak
+from reportlab.platypus import (
+    SimpleDocTemplate, Paragraph, Spacer, Image as RLImage,
+    Table, TableStyle, PageBreak
+)
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import cm
 from reportlab.lib import colors
-
-# Intentar importar python-docx
-try:
-    from docx import Document
-    from docx.shared import Inches
-    DOCX_OK = True
-except ModuleNotFoundError:
-    DOCX_OK = False
+from docx import Document
+from docx.shared import Inches
 
 # -------------------------
-# Configuración
+# Config y Streamlit
 # -------------------------
 st.set_page_config(page_title="Catálogo - Google Sheets → PDF/DOCX", layout="wide")
 st.title("🛍️ Generador de Catálogo (Google Sheets)")
@@ -41,7 +38,8 @@ def conectar_gspread(json_path):
         "https://www.googleapis.com/auth/drive"
     ]
     creds = ServiceAccountCredentials.from_json_keyfile_name(json_path, scope)
-    return gspread.authorize(creds)
+    client = gspread.authorize(creds)
+    return client
 
 def crear_template_en_sheets(client, spreadsheet_name="Catalogo"):
     try:
@@ -53,9 +51,11 @@ def crear_template_en_sheets(client, spreadsheet_name="Catalogo"):
             worksheet = spreadsheet.worksheet("Catalogo")
         except gspread.WorksheetNotFound:
             worksheet = spreadsheet.add_worksheet(title="Catalogo", rows="200", cols="10")
+
         headers = ["categoria", "nombre", "descripcion", "precio", "stock", "imagen"]
         worksheet.update("A1", [headers])
-        datos_demo = [
+
+        demo_data = [
             ["Electrónica", 'Televisor Samsung 40"', "Smart TV 40 pulgadas", "250", "8",
              "https://drive.google.com/file/d/10VB9sF9j6FXvRRCFM4t7t7idBkz9KARc/view?usp=sharing"],
             ["Electrónica", "Laptop HP 15\"", "15'' RAM 8GB", "500", "4",
@@ -65,7 +65,8 @@ def crear_template_en_sheets(client, spreadsheet_name="Catalogo"):
             ["Ropa", "Camiseta Polo", "Algodón premium", "30", "30",
              "https://drive.google.com/file/d/1-7LrG5cwqQ1bQhU3F2_t5GCKuVWkQUtw/view?usp=sharing"]
         ]
-        worksheet.update("A2", datos_demo)
+        worksheet.update("A2", demo_data)
+        st.success(f"Template creado o actualizado en '{spreadsheet_name}'")
         return spreadsheet
     except Exception as e:
         st.error(f"Error creando template: {e}")
@@ -79,30 +80,23 @@ def cargar_datos_google(json_path, spreadsheet_name="Catalogo"):
         data = worksheet.get_all_records()
         df = pd.DataFrame(data)
         return df, client
-    except gspread.SpreadsheetNotFound:
-        st.error(f"No existe el Google Sheet '{spreadsheet_name}'.")
-        return None, None
-    except gspread.WorksheetNotFound:
-        st.error("La hoja 'Catalogo' no existe.")
-        return None, client
     except Exception as e:
-        st.error(f"Error al leer Google Sheets: {e}")
+        st.error(f"Error al conectar/leer Google Sheets: {e}")
         return None, None
 
-# -------------------------
-# Helper: descargar imagen
-# -------------------------
 def descargar_imagen_bytes(url):
     try:
-        if not url or str(url).lower() in ["", "nan"]:
+        if not url:
+            return None
+        url = str(url).strip()
+        if url.lower() in ["", "nan"]:
             return None
         if "drive.google.com" in url:
             if "/d/" in url:
                 file_id = url.split("/d/")[1].split("/")[0]
-                url = f"https://drive.google.com/uc?export=view&id={file_id}"
             elif "id=" in url:
                 file_id = url.split("id=")[1].split("&")[0]
-                url = f"https://drive.google.com/uc?export=view&id={file_id}"
+            url = f"https://drive.google.com/uc?export=view&id={file_id}"
         resp = requests.get(url, timeout=10)
         if resp.status_code == 200 and "image" in resp.headers.get("content-type", ""):
             return BytesIO(resp.content)
@@ -111,7 +105,7 @@ def descargar_imagen_bytes(url):
     return None
 
 # -------------------------
-# Generar PDF final
+# PDF final con portada y categorías
 # -------------------------
 def generar_catalogo_pdf(df, tema_color_hex="#2E86C1", mini_logo_bytes=None, portada_info=None):
     buffer = BytesIO()
@@ -120,23 +114,23 @@ def generar_catalogo_pdf(df, tema_color_hex="#2E86C1", mini_logo_bytes=None, por
     styles = getSampleStyleSheet()
     tema_color = colors.HexColor(tema_color_hex)
 
+    # Portada
     if portada_info:
         title = portada_info.get("title", "")
         subtitle = portada_info.get("subtitle", "")
         logo_b = portada_info.get("logo_bytes", None)
         story.append(Spacer(1, 2*cm))
         if logo_b:
-            try:
-                story.append(RLImage(logo_b, width=6*cm, height=6*cm))
-                story.append(Spacer(1, 0.5*cm))
-            except Exception:
-                pass
+            story.append(RLImage(logo_b, width=6*cm, height=6*cm))
+            story.append(Spacer(1, 0.5*cm))
         if title:
             story.append(Paragraph(f"<b>{title}</b>", ParagraphStyle(name="PortTitle", fontSize=22, alignment=1, textColor=tema_color)))
             story.append(Spacer(1, 0.2*cm))
         if subtitle:
             story.append(Paragraph(subtitle, ParagraphStyle(name="PortSub", fontSize=12, alignment=1)))
             story.append(Spacer(1, 0.5*cm))
+        fecha = datetime.now().strftime("%d %B %Y")
+        story.append(Paragraph(f"<i>Generado: {fecha}</i>", ParagraphStyle(name="PortDate", fontSize=9, alignment=1, textColor=colors.grey)))
         story.append(PageBreak())
 
     styles.add(ParagraphStyle(name="CategoriaTitle", fontSize=16, leading=18, spaceAfter=8, textColor=tema_color))
@@ -144,8 +138,8 @@ def generar_catalogo_pdf(df, tema_color_hex="#2E86C1", mini_logo_bytes=None, por
     styles.add(ParagraphStyle(name="ProductoText", fontSize=10, leading=12))
 
     grouped = list(df.groupby("categoria")) if "categoria" in df.columns else [("Todos", df)]
-    productos_por_fila = 2
 
+    productos_por_fila = 2
     for categoria, grupo in grouped:
         story.append(Paragraph(f"{categoria}", styles["CategoriaTitle"]))
         story.append(Spacer(1, 0.2*cm))
@@ -153,10 +147,10 @@ def generar_catalogo_pdf(df, tema_color_hex="#2E86C1", mini_logo_bytes=None, por
         fila = []
         celdas = []
         for _, row in grupo.iterrows():
-            nombre = str(row.get("nombre", ""))
-            descripcion = str(row.get("descripcion", "")) if "descripcion" in row else ""
-            precio = str(row.get("precio", ""))
-            stock = str(row.get("stock", ""))
+            nombre = str(row.get("nombre", row.get("Nombre", "")))
+            descripcion = str(row.get("descripcion", row.get("Descripcion", ""))) if "descripcion" in row else ""
+            precio = str(row.get("precio", row.get("Precio", "")))
+            stock = str(row.get("stock", row.get("Stock", "")))
             imagen_url = row.get("imagen", "")
 
             img_bytes = descargar_imagen_bytes(imagen_url)
@@ -170,7 +164,7 @@ def generar_catalogo_pdf(df, tema_color_hex="#2E86C1", mini_logo_bytes=None, por
                 Paragraph(f"<b>{nombre}</b>", styles["ProductoTitle"]),
                 Paragraph(descripcion, styles["ProductoText"]),
                 Paragraph(f"Precio: ${precio}", styles["ProductoText"]),
-                Paragraph(f"Stock: {stock}", styles["ProductoText"])
+                Paragraph(f"Stock: {stock}", styles["ProductoText"]),
             ]
             if mini_logo_bytes:
                 try:
@@ -187,13 +181,14 @@ def generar_catalogo_pdf(df, tema_color_hex="#2E86C1", mini_logo_bytes=None, por
                 ("TOPPADDING", (0,0), (-1,-1), 6),
                 ("BOTTOMPADDING", (0,0), (-1,-1), 6)
             ]))
+
             fila.append(ficha)
             if len(fila) == productos_por_fila:
                 celdas.append(fila)
                 fila = []
+
         if fila:
             celdas.append(fila)
-
         if celdas:
             tabla = Table(celdas, colWidths=[9*cm]*productos_por_fila)
             tabla.setStyle(TableStyle([
@@ -203,6 +198,7 @@ def generar_catalogo_pdf(df, tema_color_hex="#2E86C1", mini_logo_bytes=None, por
                 ("BOTTOMPADDING", (0,0), (-1,-1), 10),
             ]))
             story.append(tabla)
+
         story.append(PageBreak())
 
     doc.build(story)
@@ -217,6 +213,7 @@ def generar_mockup_visual():
     doc = SimpleDocTemplate(buffer, pagesize=A4)
     story = []
     styles = getSampleStyleSheet()
+
     story.append(Paragraph("📘 Guía Visual - Mockup de Catálogo", styles["Title"]))
     story.append(Spacer(1, 0.5*cm))
 
@@ -246,20 +243,17 @@ def generar_mockup_visual():
 # DOCX editable
 # -------------------------
 def generar_version_editable_docx(df):
-    if not DOCX_OK:
-        st.error("python-docx no está instalado, DOCX no se generará.")
-        return None
     doc = Document()
     doc.add_heading("Catálogo de Productos", level=1)
     doc.add_paragraph(f"Generado: {datetime.now().strftime('%d %B %Y')}")
     doc.add_paragraph("")
 
     for _, row in df.iterrows():
-        nombre = str(row.get("nombre", ""))
-        categoria = str(row.get("categoria", ""))
-        descripcion = str(row.get("descripcion", "")) if "descripcion" in row else ""
-        precio = str(row.get("precio", ""))
-        stock = str(row.get("stock", ""))
+        nombre = str(row.get("nombre", row.get("Nombre", "")))
+        categoria = str(row.get("categoria", row.get("Categoria", "")))
+        descripcion = str(row.get("descripcion", row.get("Descripcion", ""))) if "descripcion" in row else ""
+        precio = str(row.get("precio", row.get("Precio", "")))
+        stock = str(row.get("stock", row.get("Stock", "")))
         imagen_url = row.get("imagen", "")
 
         doc.add_heading(nombre, level=2)
@@ -272,9 +266,7 @@ def generar_version_editable_docx(df):
         img_bytes = descargar_imagen_bytes(imagen_url)
         if img_bytes:
             try:
-                tmp_img = BytesIO(img_bytes.getvalue())
-                tmp_img.name = "temp.png"
-                doc.add_picture(tmp_img, width=Inches(2.5))
+                doc.add_picture(img_bytes, width=Inches(2.5))
             except Exception:
                 pass
         doc.add_paragraph("")
@@ -285,7 +277,7 @@ def generar_version_editable_docx(df):
     return bio
 
 # -------------------------
-# Interfaz Streamlit
+# Streamlit UI
 # -------------------------
 st.sidebar.header("Conectar Google Sheets / Template")
 uploaded_json = st.sidebar.file_uploader("Sube credenciales (JSON)", type=["json"])
@@ -293,6 +285,7 @@ spreadsheet_name = st.sidebar.text_input("Nombre del Google Sheet", value="Catal
 
 if uploaded_json:
     json_path = guardar_json_temp(uploaded_json)
+    client = None
     try:
         client = conectar_gspread(json_path)
         st.sidebar.success("✅ Conexión preparada")
@@ -318,9 +311,9 @@ if uploaded_json:
 if "df" in st.session_state:
     df = st.session_state["df"]
     st.markdown("### 📄 Generar archivos")
-    tema_color = st.color_picker("Color principal del PDF", "#2E86C1")
-    portada_title = st.text_input("Título de portada", value="Catálogo de Productos")
-    portada_sub = st.text_input("Subtítulo de portada", value="Lista de productos")
+    tema_color = st.color_picker("Color principal del PDF (tema)", "#2E86C1")
+    portada_title = st.text_input("Título de portada (opcional)", value="Catálogo de Productos")
+    portada_sub = st.text_input("Subtítulo de portada (opcional)", value="Lista de productos")
     logo_file = st.file_uploader("Sube logo de portada (opcional)", type=["png","jpg"])
     mini_logo_file = st.file_uploader("Sube mini-logo (opcional)", type=["png","jpg"])
 
@@ -328,11 +321,12 @@ if "df" in st.session_state:
     mini_logo_bytes = BytesIO(mini_logo_file.read()) if mini_logo_file else None
 
     col1, col2, col3 = st.columns(3)
+
     with col1:
         if st.button("📘 Catálogo Final (PDF)"):
             portada_info = {"title": portada_title, "subtitle": portada_sub, "logo_bytes": logo_bytes}
             pdf = generar_catalogo_pdf(df, tema_color_hex=tema_color, mini_logo_bytes=mini_logo_bytes, portada_info=portada_info)
-            st.success("PDF generado")
+            st.success("Catálogo PDF generado")
             st.download_button("⬇️ Descargar PDF Final", data=pdf, file_name="catalogo_final.pdf", mime="application/pdf")
 
     with col2:
@@ -344,8 +338,7 @@ if "df" in st.session_state:
     with col3:
         if st.button("✏️ Versión Editable (DOCX)"):
             docx_b = generar_version_editable_docx(df)
-            if docx_b:
-                st.success("DOCX generado")
-                st.download_button("⬇️ Descargar DOCX editable", data=docx_b, file_name="catalogo_editable.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+            st.success("DOCX generado")
+            st.download_button("⬇️ Descargar DOCX editable", data=docx_b, file_name="catalogo_editable.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 else:
     st.info("Sube las credenciales y carga la hoja 'Catalogo' para generar archivos.")
