@@ -1,3 +1,4 @@
+# streamlit_app.py
 import streamlit as st
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
@@ -6,206 +7,388 @@ import tempfile
 import requests
 from io import BytesIO
 from datetime import datetime
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image, PageBreak
+from reportlab.lib.pagesizes import A4
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image as RLImage, Table, TableStyle, PageBreak
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import cm
 from reportlab.lib import colors
-from reportlab.lib.pagesizes import A4
+from docx import Document
+from docx.shared import Inches
 
-st.set_page_config(page_title="Catálogo Template", page_icon="📦")
-st.title("📊 Catálogo Corporativo Editable (Template)")
+# -------------------------
+# Config y requirements
+# -------------------------
+st.set_page_config(page_title="Catálogo - Google Sheets → PDF/DOCX", layout="wide")
+st.title("🛍️ Generador de Catálogo (Google Sheets)")
 
-uploaded_file = st.file_uploader("Sube tu archivo de credenciales (.json)", type="json")
+# Requisitos sugeridos (requirements.txt):
+# streamlit
+# gspread
+# oauth2client
+# pandas
+# requests
+# reportlab
+# python-docx
+# openpyxl
 
-# --- Cargar datos desde Google Sheets ---
-def cargar_datos(credenciales):
+# -------------------------
+# Helpers: conectar a Google
+# -------------------------
+def guardar_json_temp(uploaded_json):
+    """Guarda el JSON subido en un archivo temporal y devuelve la ruta."""
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".json") as temp:
+        temp.write(uploaded_json.read())
+        return temp.name
+
+def conectar_gspread(json_path):
+    scope = [
+        "https://spreadsheets.google.com/feeds",
+        "https://www.googleapis.com/auth/drive"
+    ]
+    creds = ServiceAccountCredentials.from_json_keyfile_name(json_path, scope)
+    client = gspread.authorize(creds)
+    return client
+
+# -------------------------
+# Crear template en Google Sheets
+# -------------------------
+def crear_template_en_sheets(client, spreadsheet_name="Catalogo"):
     try:
-        scope = ["https://spreadsheets.google.com/feeds","https://www.googleapis.com/auth/drive"]
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".json") as temp:
-            temp.write(credenciales.read())
-            temp_path = temp.name
-        creds = ServiceAccountCredentials.from_json_keyfile_name(temp_path, scope)
-        client = gspread.authorize(creds)
-        sheet = client.open("Catalogo").sheet1
-        data = sheet.get_all_records()
-        df = pd.DataFrame(data)
+        try:
+            spreadsheet = client.open(spreadsheet_name)
+            created = False
+        except gspread.SpreadsheetNotFound:
+            spreadsheet = client.create(spreadsheet_name)
+            created = True
+        # crear/obtener worksheet "Catalogo"
+        try:
+            worksheet = spreadsheet.worksheet("Catalogo")
+        except gspread.WorksheetNotFound:
+            worksheet = spreadsheet.add_worksheet(title="Catalogo", rows="200", cols="10")
 
-        # Garantizar columna 'categoria'
-        if "categoria" in df.columns:
-            df["categoria"] = df["categoria"].fillna(df.get("Categoria","Sin categoría"))
-        elif "Categoria" in df.columns:
-            df["categoria"] = df["Categoria"].fillna("Sin categoría")
-        else:
-            df["categoria"] = "Sin categoría"
-        return df
+        headers = ["categoria", "nombre", "descripcion", "precio", "stock", "imagen"]
+        worksheet.update("A1", [headers])
+
+        datos_demo = [
+            ["Electrónica", 'Televisor Samsung 40"', "Smart TV 40 pulgadas", "250", "8",
+             "https://drive.google.com/file/d/10VB9sF9j6FXvRRCFM4t7t7idBkz9KARc/view?usp=sharing"],
+            ["Electrónica", "Laptop HP 15\"", "15'' RAM 8GB", "500", "4",
+             "https://drive.google.com/file/d/1bVgLB1ps02AYEzoPEQnsxB5lUfO9dJDY/view?usp=sharing"],
+            ["Hogar", "Silla ergonómica", "Con soporte lumbar", "80", "12",
+             "https://drive.google.com/file/d/1vV9AD4S1zowIrW-rtTq-6Zb8xRj1zPqg/view?usp=sharing"],
+            ["Ropa", "Camiseta Polo", "Algodón premium", "30", "30",
+             "https://drive.google.com/file/d/1-7LrG5cwqQ1bQhU3F2_t5GCKuVWkQUtw/view?usp=sharing"]
+        ]
+        worksheet.update("A2", datos_demo)
+
+        return spreadsheet
     except Exception as e:
-        st.error(f"🚫 Error al conectar con Google Sheets: {e}")
+        st.error(f"Error creando template: {e}")
         return None
 
-# --- Cargar datos ---
-if uploaded_file is not None:
-    if st.button("Cargar datos"):
-        df = cargar_datos(uploaded_file)
-        if df is not None and not df.empty:
-            st.success("✅ Datos cargados correctamente.")
-            st.dataframe(df)
-            st.session_state["df"] = df
-        else:
-            st.warning("No se encontraron datos o la hoja está vacía.")
-else:
-    st.info("🔹 Sube tu archivo de credenciales JSON para comenzar.")
+# -------------------------
+# Cargar datos desde Google Sheets
+# -------------------------
+def cargar_datos_google(json_path, spreadsheet_name="Catalogo"):
+    try:
+        client = conectar_gspread(json_path)
+        try:
+            spreadsheet = client.open(spreadsheet_name)
+        except gspread.SpreadsheetNotFound:
+            st.error(f"No existe el Google Sheet llamado '{spreadsheet_name}'. Puedes crear el template desde la app.")
+            return None, client
+        try:
+            worksheet = spreadsheet.worksheet("Catalogo")
+        except gspread.WorksheetNotFound:
+            st.error("La hoja 'Catalogo' no existe. Crea el template en el menú lateral.")
+            return None, client
+        data = worksheet.get_all_records()
+        df = pd.DataFrame(data)
+        return df, client
+    except Exception as e:
+        st.error(f"Error al conectar/leer Google Sheets: {e}")
+        return None, None
 
-# --- Función para numerar páginas ---
-def add_page_number(canvas, doc):
-    page_num = canvas.getPageNumber()
-    canvas.setFont("Helvetica", 8)
-    canvas.drawRightString(A4[0]-2*cm, 1*cm, f"Página {page_num} - {datetime.today().strftime('%d/%m/%Y')}")
+# -------------------------
+# Util: descargar imagen desde URL (devuelve BytesIO o None)
+# -------------------------
+def descargar_imagen_bytes(url):
+    try:
+        if not url:
+            return None
+        url = str(url).strip()
+        if url == "" or url.lower() == "nan":
+            return None
+        # Manejar Google Drive share links
+        if "drive.google.com" in url:
+            if "/d/" in url:
+                file_id = url.split("/d/")[1].split("/")[0]
+                url = f"https://drive.google.com/uc?export=view&id={file_id}"
+            elif "id=" in url:
+                file_id = url.split("id=")[1].split("&")[0]
+                url = f"https://drive.google.com/uc?export=view&id={file_id}"
+        resp = requests.get(url, timeout=10)
+        if resp.status_code == 200 and "image" in resp.headers.get("content-type", ""):
+            return BytesIO(resp.content)
+    except Exception:
+        return None
+    return None
 
-# --- Función para generar catálogo template ---
-def generar_catalogo_template(df, logo_path="logo.png", fondo_portada_path="fondo_portada.jpg", mini_logo_path=None):
+# -------------------------
+# 1) Catálogo Final (PDF parametrizable)
+# -------------------------
+def generar_catalogo_pdf(dataframe, tema_color_hex="#2E86C1", mini_logo_bytes=None, portada_info=None):
     buffer = BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=A4)
     story = []
-
     styles = getSampleStyleSheet()
-    styles.add(ParagraphStyle(name="TituloPrincipal", fontSize=24, leading=28, alignment=1, spaceAfter=20, textColor=colors.HexColor("#1F618D")))
-    styles.add(ParagraphStyle(name="ProductoTitulo", fontSize=12, leading=14, alignment=1, textColor=colors.HexColor("#2C3E50")))
-    styles.add(ParagraphStyle(name="ProductoTexto", fontSize=10, leading=12, alignment=1))
+    tema_color = colors.HexColor(tema_color_hex)
 
-    # --- Portada con fondo y logo ---
-    try:
-        fondo = Image(fondo_portada_path, width=A4[0], height=A4[1])
-        story.append(fondo)
-    except:
-        pass
-    try:
-        logo = Image(logo_path, width=6*cm, height=6*cm)
-        logo.hAlign = "CENTER"
-        story.append(Spacer(1,5*cm))
-        story.append(logo)
-    except:
-        story.append(Spacer(1,10*cm))
+    # Portada opcional (si portada_info dict con title/subtitle/logo_bytes)
+    if portada_info:
+        title = portada_info.get("title", "")
+        subtitle = portada_info.get("subtitle", "")
+        logo_b = portada_info.get("logo_bytes", None)
+        # Logo
+        story.append(Spacer(1, 2 * cm))
+        if logo_b:
+            try:
+                story.append(RLImage(logo_b, width=6*cm, height=6*cm))
+                story.append(Spacer(1, 0.5*cm))
+            except Exception:
+                pass
+        if title:
+            story.append(Paragraph(f"<b>{title}</b>", ParagraphStyle(name="PortTitle", fontSize=22, alignment=1, textColor=tema_color)))
+            story.append(Spacer(1, 0.2*cm))
+        if subtitle:
+            story.append(Paragraph(subtitle, ParagraphStyle(name="PortSub", fontSize=12, alignment=1)))
+            story.append(Spacer(1, 0.5*cm))
+        fecha = datetime.now().strftime("%d %B %Y")
+        story.append(Paragraph(f"<i>Generado: {fecha}</i>", ParagraphStyle(name="PortDate", fontSize=9, alignment=1, textColor=colors.grey)))
+        story.append(PageBreak())
 
-    story.append(Paragraph("📦 Catálogo Corporativo Editable", styles["TituloPrincipal"]))
-    story.append(PageBreak())
+    styles.add(ParagraphStyle(name="CategoriaTitle", fontSize=16, leading=18, spaceAfter=8, textColor=tema_color))
+    styles.add(ParagraphStyle(name="ProductoTitle", fontSize=12, leading=14, alignment=1, textColor=colors.HexColor("#212F3D")))
+    styles.add(ParagraphStyle(name="ProductoText", fontSize=10, leading=12))
 
-    # --- Productos por categoría ---
-    categorias = df['categoria'].unique()
-    for cat in categorias:
-        cat_data = df[df['categoria']==cat]
-        story.append(Paragraph(f"Categoría: {cat}", ParagraphStyle(
-            name="CategoriaTitulo", fontSize=16, leading=20, textColor=colors.white,
-            backColor=colors.HexColor("#2E86C1"), alignment=0, spaceAfter=12, spaceBefore=12
-        )))
+    if "categoria" not in dataframe.columns:
+        st.warning("La columna 'categoria' no existe. Se generará un listado sin agrupar.")
+        categorias = ["Todos"]
+        grouped = [("Todos", dataframe)]
+    else:
+        grouped = list(dataframe.groupby("categoria"))
 
-        productos_por_fila = 2
-        filas_por_pagina = 3
-        productos_por_pagina = productos_por_fila * filas_por_pagina
+    productos_por_fila = 2
 
-        for i in range(0, len(cat_data), productos_por_pagina):
-            page_data = cat_data.iloc[i:i+productos_por_pagina]
-            celdas = []
-            fila = []
+    for categoria, grupo in grouped:
+        # Título de categoría
+        story.append(Paragraph(f"{categoria}", styles["CategoriaTitle"]))
+        story.append(Spacer(1, 0.2*cm))
 
-            for _, row in page_data.iterrows():
-                nombre = str(row.get("nombre", row.get("Nombre",""))) or "N/A"
-                precio = str(row.get("precio", row.get("Precio",""))) or "N/A"
-                stock = str(row.get("stock", row.get("Stock",""))) or "N/A"
-                imagen_url = str(row.get("imagen", row.get("Imagen",""))) or ""
+        fila = []
+        celdas = []
+        for _, row in grupo.iterrows():
+            nombre = str(row.get("nombre", row.get("Nombre", "")))
+            descripcion = str(row.get("descripcion", row.get("Descripcion", ""))) if "descripcion" in row else ""
+            precio = str(row.get("precio", row.get("Precio", "")))
+            stock = str(row.get("stock", row.get("Stock", "")))
+            imagen_url = row.get("imagen", "")
 
-                # --- Imagen o placeholder ---
-                if imagen_url.lower() in ["", "nan"]:
-                    img = Table([[Paragraph("Imagen no disponible", styles["ProductoTexto"])]], colWidths=[5*cm], rowHeights=[5*cm])
-                    img.setStyle(TableStyle([
-                        ("BACKGROUND",(0,0),(-1,-1),colors.lightgrey),
-                        ("ALIGN",(0,0),(-1,-1),"CENTER"),
-                        ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
-                        ("BOX",(0,0),(-1,-1),0.25,colors.grey)
-                    ]))
-                else:
-                    try:
-                        if "drive.google.com" in imagen_url:
-                            if "/d/" in imagen_url:
-                                file_id = imagen_url.split("/d/")[1].split("/")[0]
-                            elif "id=" in imagen_url:
-                                file_id = imagen_url.split("id=")[1].split("&")[0]
-                            else:
-                                file_id = ""
-                            if file_id:
-                                imagen_url = f"https://drive.google.com/uc?export=view&id={file_id}"
-                        response = requests.get(imagen_url, timeout=10)
-                        if response.status_code==200:
-                            img_data = BytesIO(response.content)
-                            img = Image(img_data, width=5*cm, height=5*cm)
-                        else:
-                            raise ValueError("No se pudo descargar imagen")
-                    except:
-                        img = Table([[Paragraph("Imagen no disponible", styles["ProductoTexto"])]], colWidths=[5*cm], rowHeights=[5*cm])
-                        img.setStyle(TableStyle([
-                            ("BACKGROUND",(0,0),(-1,-1),colors.lightgrey),
-                            ("ALIGN",(0,0),(-1,-1),"CENTER"),
-                            ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
-                            ("BOX",(0,0),(-1,-1),0.25,colors.grey)
-                        ]))
+            img_bytes = descargar_imagen_bytes(imagen_url)
+            if img_bytes:
+                img_flow = RLImage(img_bytes, width=5*cm, height=5*cm)
+            else:
+                img_flow = Paragraph("🖼️ Imagen no disponible", styles["ProductoText"])
 
-                # --- Mini logo opcional ---
-                mini_logo = None
-                if mini_logo_path:
-                    try:
-                        mini_logo_img = Image(mini_logo_path, width=1.5*cm, height=1.5*cm)
-                        mini_logo_img.hAlign = "RIGHT"
-                        mini_logo = mini_logo_img
-                    except:
-                        mini_logo = None
+            elementos = [
+                img_flow,
+                Paragraph(f"<b>{nombre}</b>", styles["ProductoTitle"]),
+                Paragraph(descripcion, styles["ProductoText"]),
+                Paragraph(f"Precio: ${precio}", styles["ProductoText"]),
+                Paragraph(f"Stock: {stock}", styles["ProductoText"]),
+            ]
+            if mini_logo_bytes:
+                try:
+                    mini_img = RLImage(mini_logo_bytes, width=0.8*cm, height=0.8*cm)
+                    elementos.append(mini_img)
+                except Exception:
+                    pass
 
-                # --- Ficha de producto editable ---
-                ficha = [img, Paragraph(f"<b>{nombre}</b>", styles["ProductoTitulo"])]
-                if mini_logo: ficha.append(mini_logo)
-                ficha.extend([Paragraph(f"Precio: ${precio}", styles["ProductoTexto"]),
-                              Paragraph(f"Stock: {stock}", styles["ProductoTexto"])])
+            ficha = Table([[e] for e in elementos], colWidths=[6.8*cm])
+            ficha.setStyle(TableStyle([
+                ("ALIGN", (0,0), (-1,-1), "CENTER"),
+                ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+                ("BOX", (0,0), (-1,-1), 0.25, colors.grey),
+                ("TOPPADDING", (0,0), (-1,-1), 6),
+                ("BOTTOMPADDING", (0,0), (-1,-1), 6)
+            ]))
 
-                ficha_table = Table([[ficha[0]],[ficha[1]] + ([ficha[2]] if mini_logo else []), [ficha[-2]],[ficha[-1]]])
-                ficha_table.setStyle(TableStyle([
-                    ("ALIGN",(0,0),(-1,-1),"CENTER"),
-                    ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
-                    ("BOX",(0,0),(-1,-1),0.5,colors.HexColor("#2980B9")),
-                    ("BACKGROUND",(0,0),(-1,0),colors.whitesmoke),
-                    ("TOPPADDING",(0,0),(-1,-1),5),
-                    ("BOTTOMPADDING",(0,0),(-1,-1),5)
-                ]))
-
-                fila.append(ficha_table)
-                if len(fila)==productos_por_fila:
-                    celdas.append(fila)
-                    fila = []
-
-            if fila:
+            fila.append(ficha)
+            if len(fila) == productos_por_fila:
                 celdas.append(fila)
+                fila = []
 
+        if fila:
+            celdas.append(fila)
+
+        if celdas:
             tabla = Table(celdas, colWidths=[9*cm]*productos_por_fila)
-            tabla.setStyle(TableStyle([("ALIGN",(0,0),(-1,-1),"CENTER"),
-                                       ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
-                                       ("TOPPADDING",(0,0),(-1,-1),10),
-                                       ("BOTTOMPADDING",(0,0),(-1,-1),10)]))
+            tabla.setStyle(TableStyle([
+                ("ALIGN", (0,0), (-1,-1), "CENTER"),
+                ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+                ("TOPPADDING", (0,0), (-1,-1), 10),
+                ("BOTTOMPADDING", (0,0), (-1,-1), 10),
+            ]))
             story.append(tabla)
-            story.append(Spacer(1,1*cm))
 
         story.append(PageBreak())
 
-    doc.build(story, onFirstPage=add_page_number, onLaterPages=add_page_number)
+    doc.build(story)
     buffer.seek(0)
     return buffer
 
-# --- Botón para generar PDF template ---
+# -------------------------
+# 2) Mockup Visual (zonas de edición)
+# -------------------------
+def generar_mockup_visual():
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4)
+    story = []
+    styles = getSampleStyleSheet()
+
+    story.append(Paragraph("📘 Guía Visual - Mockup de Catálogo", styles["Title"]))
+    story.append(Spacer(1, 0.5*cm))
+
+    zonas = [
+        ("Zona: Logo / Cabecera", colors.Color(0.9,0.95,1)),
+        ("Zona: Título de categoría", colors.Color(0.95,1,0.95)),
+        ("Zona: Ficha de producto (imagen + datos)", colors.Color(0.98,0.98,0.98)),
+        ("Zona: Mini logo (opcional)", colors.Color(1,0.98,0.9)),
+    ]
+
+    for label, bgcolor in zonas:
+        t = Table([[Paragraph(label, styles["Normal"])]], colWidths=[16*cm], rowHeights=[2.2*cm])
+        t.setStyle(TableStyle([
+            ("BACKGROUND", (0,0), (-1,-1), bgcolor),
+            ("BOX", (0,0), (-1,-1), 1, colors.grey),
+            ("ALIGN", (0,0), (-1,-1), "CENTER"),
+            ("VALIGN", (0,0), (-1,-1), "MIDDLE")
+        ]))
+        story.append(t)
+        story.append(Spacer(1, 0.4*cm))
+
+    doc.build(story)
+    buffer.seek(0)
+    return buffer
+
+# -------------------------
+# 3) Versión editable DOCX
+# -------------------------
+def generar_version_editable_docx(dataframe):
+    doc = Document()
+    doc.add_heading("Catálogo de Productos", level=1)
+    doc.add_paragraph(f"Generado: {datetime.now().strftime('%d %B %Y')}")
+    doc.add_paragraph("")
+
+    for _, row in dataframe.iterrows():
+        nombre = str(row.get("nombre", row.get("Nombre", "")))
+        categoria = str(row.get("categoria", row.get("Categoria", "")))
+        descripcion = str(row.get("descripcion", row.get("Descripcion", ""))) if "descripcion" in row else ""
+        precio = str(row.get("precio", row.get("Precio", "")))
+        stock = str(row.get("stock", row.get("Stock", "")))
+        imagen_url = row.get("imagen", "")
+
+        doc.add_heading(nombre, level=2)
+        doc.add_paragraph(f"Categoría: {categoria}")
+        if descripcion:
+            doc.add_paragraph(descripcion)
+        doc.add_paragraph(f"Precio: ${precio}")
+        doc.add_paragraph(f"Stock: {stock}")
+
+        # intentar añadir imagen (si existe)
+        img_bytes = descargar_imagen_bytes(imagen_url)
+        if img_bytes:
+            try:
+                doc.add_picture(img_bytes, width=Inches(2.5))
+            except Exception:
+                pass
+        doc.add_paragraph("")  # separador
+
+    bio = BytesIO()
+    doc.save(bio)
+    bio.seek(0)
+    return bio
+
+# -------------------------
+# Interfaz Streamlit
+# -------------------------
+st.sidebar.header("Conectar Google Sheets / Template")
+uploaded_json = st.sidebar.file_uploader("Sube credenciales (JSON)", type=["json"])
+spreadsheet_name = st.sidebar.text_input("Nombre del Google Sheet", value="Catalogo")
+
+if uploaded_json:
+    json_path = guardar_json_temp(uploaded_json)
+    client = None
+    try:
+        client = conectar_gspread(json_path)
+        st.sidebar.success("✅ Conexión preparada")
+    except Exception as e:
+        st.sidebar.error(f"Error con credenciales: {e}")
+        client = None
+
+    if client:
+        if st.sidebar.button("Crear template en Google Sheets"):
+            crear_template_en_sheets(client, spreadsheet_name)
+        if st.sidebar.button("Cargar datos (hoja 'Catalogo')"):
+            df, _ = cargar_datos_google(json_path, spreadsheet_name)
+            if df is not None and not df.empty:
+                st.success("✅ Datos cargados")
+                st.dataframe(df)
+                st.session_state["df"] = df
+            else:
+                st.warning("La hoja 'Catalogo' está vacía o no tiene el formato esperado.")
+
+# -------------------------
+# Botones principales (3 outputs)
+# -------------------------
 if "df" in st.session_state:
     df = st.session_state["df"]
-    st.subheader("📄 Generar catálogo Template PDF")
-    if st.button("📘 Generar PDF Template"):
-        pdf_buffer = generar_catalogo_template(df, logo_path="logo.png", fondo_portada_path="fondo_portada.jpg", mini_logo_path="mini_logo.png")
-        st.success("Catálogo template generado ✅")
-        st.download_button(
-            label="⬇️ Descargar PDF Template",
-            data=pdf_buffer,
-            file_name="catalogo_template.pdf",
-            mime="application/pdf"
-        )
+    st.markdown("### 📄 Generar archivos")
+    # inputs para personalización
+    tema_color = st.color_picker("Color principal del PDF (tema)", "#2E86C1")
+    portada_title = st.text_input("Título de portada (opcional)", value="Catálogo de Productos")
+    portada_sub = st.text_input("Subtítulo de portada (opcional)", value="Lista de productos")
+    logo_file = st.file_uploader("Sube logo de portada (opcional)", type=["png","jpg"])
+    mini_logo_file = st.file_uploader("Sube mini-logo (opcional)", type=["png","jpg"])
+
+    # preparar bytes
+    logo_bytes = None
+    if logo_file:
+        logo_bytes = BytesIO(logo_file.read())
+    mini_logo_bytes = None
+    if mini_logo_file:
+        mini_logo_bytes = BytesIO(mini_logo_file.read())
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        if st.button("📘 Catálogo Final (PDF)"):
+            portada_info = {"title": portada_title, "subtitle": portada_sub, "logo_bytes": logo_bytes}
+            pdf = generar_catalogo_pdf(df, tema_color_hex=tema_color, mini_logo_bytes=mini_logo_bytes, portada_info=portada_info)
+            st.success("Catálogo PDF generado")
+            st.download_button("⬇️ Descargar PDF Final", data=pdf, file_name="catalogo_final.pdf", mime="application/pdf")
+
+    with col2:
+        if st.button("🧱 Mockup Visual (PDF)"):
+            pdfm = generar_mockup_visual()
+            st.success("Mockup PDF generado")
+            st.download_button("⬇️ Descargar Mockup", data=pdfm, file_name="mockup_visual.pdf", mime="application/pdf")
+
+    with col3:
+        if st.button("✏️ Versión Editable (DOCX)"):
+            docx_b = generar_version_editable_docx(df)
+            st.success("DOCX generado")
+            st.download_button("⬇️ Descargar DOCX editable", data=docx_b, file_name="catalogo_editable.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+
+else:
+    st.info("Sube las credenciales y carga la hoja 'Catalogo' para generar archivos.")
